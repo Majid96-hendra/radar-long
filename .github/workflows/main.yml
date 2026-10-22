@@ -1,0 +1,36 @@
+name: Radar Long
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: radar-long
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Scan long dan kirim ke Telegram
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SOURCE: bitget
+          MODAL_USDT: "100"
+          RISK_PCT: "2"
+        run: python3 long_bot.py scan
+
+      - name: Simpan state anti-spam
+        run: |
+          git config user.name "radar-bot"
+          git config user.email "radar-bot@users.noreply.github.com"
+          git add long_state.json
+          git diff --cached --quiet || (git commit -m "update state" && git push)
