@@ -174,6 +174,23 @@ def near_resistance(h, entry, look=96, k=3):
     return best
 
 
+def plan(entry, sl, atr, swing=None):
+    """Hitung level trade. SL minimal 0,8 ATR; TP1 1,5R (atau high sebelumnya), TP2 3R."""
+    sl = min(sl, entry - 0.8 * atr)
+    risk = entry - sl
+    if risk <= 0 or risk / entry > 0.06:
+        return None
+    tp2 = entry + 3.0 * risk
+    if swing is not None:
+        if swing - entry < 1.0 * risk:
+            return None
+        tp1 = min(entry + 1.5 * risk, swing)
+    else:
+        tp1 = entry + 1.5 * risk
+    return dict(entry=entry, sl=sl, tp1=tp1, tp2=tp2, risk=risk, sl_pct=risk / entry * 100,
+                r1=(tp1 - entry) / risk, r2=3.0)
+
+
 # ---------------- Analisis satu koin ----------------
 def analyze(raw, fund8):
     """Return dict(kind='A'|'B'|'W', ...) atau None."""
@@ -231,13 +248,21 @@ def analyze(raw, fund8):
         sl = min(l[-1], res) - 0.3 * atr
 
     if kind is None:
-        # daftar pantauan: hampir jadi tapi belum terkonfirmasi
+        # daftar pantauan: hampir jadi tapi belum terkonfirmasi, lengkap dengan rencana level
         if pullback and rmin <= 52 and price <= e21[-1] + 0.5 * atr and not trigger:
-            return dict(kind="W", score=40 + clamp((depth - 1.5) / 3, 0, 1) * 10,
-                        note="pullback ke EMA21, tunggu candle bullish (RSI %.0f)" % rnow)
+            ent = max(h[-1], e21[-1]) * 1.001
+            pl = plan(ent, l[iLo] - 0.25 * atr, atr, h[iH])
+            if pl:
+                return dict(kind="W", score=40 + clamp((depth - 1.5) / 3, 0, 1) * 10, plan=pl,
+                            note="Pullback ke EMA21 di uptrend (RSI %.0f)" % rnow,
+                            cond="candle 15m CLOSE di atas %s dan berwarna hijau kuat" % fmt(ent))
         if res - 0.6 * atr <= price <= res and volx >= 1.2:
-            return dict(kind="W", score=35 + clamp((volx - 1.2) / 1.5, 0, 1) * 10,
-                        note="dekat breakout %s, volume %.1fx" % (fmt(res), volx))
+            ent = res * 1.001
+            pl = plan(ent, min(l[-1], res) - 0.3 * atr, atr)
+            if pl:
+                return dict(kind="W", score=35 + clamp((volx - 1.2) / 1.5, 0, 1) * 10, plan=pl,
+                            note="Dekat breakout, volume %.1fx" % volx,
+                            cond="candle 15m CLOSE di atas %s dengan volume besar" % fmt(ent))
         return None
 
     entry = price
@@ -323,36 +348,59 @@ def send(text):
     return False
 
 
+def pct(a, b):
+    return (a / b - 1) * 100
+
+
 def signal_msg(r, btc):
     risk_usdt = MODAL * RISK_PCT / 100
     notional = risk_usdt / (r["sl_pct"] / 100)
+    e = r["entry"]
     return "\n".join([
-        "🟢 <b>LONG %s</b> | %s | skor %d" % (html.escape(r["name"]), r["label"], round(r["score"])),
+        "🟢 <b>SINYAL LONG: %s</b>" % html.escape(r["name"]),
+        "%s (skor %d dari 100)" % (r["label"], round(r["score"])),
         "",
-        "Entry: <b>%s</b>" % fmt(r["entry"]),
-        "SL: <b>%s</b> (-%.1f%%)" % (fmt(r["sl"]), r["sl_pct"]),
-        "TP1: %s (%.1fR)   TP2: %s (%.1fR)" % (fmt(r["tp1"]), r["r1"], fmt(r["tp2"]), r["r2"]),
-        "Posisi: %.0f USDT (%.1fx), risiko %.2f USDT" % (notional, notional / MODAL, risk_usdt),
+        "Masuk (entry): <b>%s</b>" % fmt(e),
+        "Stop loss (SL): <b>%s</b>  (%.1f%%)" % (fmt(r["sl"]), pct(r["sl"], e)),
+        "Ambil untung 1 (TP1): <b>%s</b>  (+%.1f%%)" % (fmt(r["tp1"]), pct(r["tp1"], e)),
+        "Ambil untung 2 (TP2): <b>%s</b>  (+%.1f%%)" % (fmt(r["tp2"]), pct(r["tp2"], e)),
         "",
-        html.escape(", ".join(r["tags"])),
+        "Ukuran posisi: %.0f USDT (%.1fx), risiko maksimal %.2f USDT" % (notional, notional / MODAL, risk_usdt),
+        "",
+        "Alasan: " + html.escape(", ".join(r["tags"])),
         html.escape(btc["text"]),
-        "Setelah TP1 kena, geser SL ke entry.",
+        "",
+        "Cara pakai: masuk di sekitar harga entry, pasang SL. Saat TP1 kena, jual sebagian dan geser SL ke harga entry.",
+        r["link"],
+    ])
+
+
+def watch_block(r):
+    p = r["plan"]
+    e = p["entry"]
+    return "\n".join([
+        "🔎 <b>%s</b>: %s" % (html.escape(r["name"]), html.escape(r["note"])),
+        "Masuk hanya jika %s" % html.escape(r["cond"]),
+        "SL %s (%.1f%%) | TP1 %s (+%.1f%%) | TP2 %s (+%.1f%%)" % (
+            fmt(p["sl"]), pct(p["sl"], e), fmt(p["tp1"]), pct(p["tp1"], e), fmt(p["tp2"]), pct(p["tp2"], e)),
         r["link"],
     ])
 
 
 def summary_msg(btc, scanned, new_sig, watch, held):
     lines = ["🕒 <b>Ringkasan 15 menit</b>",
-             html.escape(btc["text"]) + (" (risk-off, sinyal ditahan)" if btc["risk_off"] and BTC_FILTER else ""),
-             "%d koin dicek, sinyal long baru: %d, pantauan: %d" % (scanned, new_sig, len(watch))]
+             html.escape(btc["text"]) + (" (BTC risk-off, sinyal ditahan)" if btc["risk_off"] and BTC_FILTER else ""),
+             "%d koin dicek. Sinyal long baru: %d. Calon: %d." % (scanned, new_sig, len(watch))]
     if held:
         lines.append("Ditahan karena BTC: " + ", ".join(held[:6]))
     if watch:
-        lines.append("")
-        lines.append("Pantauan:")
-        for r in watch[:6]:
-            lines.append("• %s: %s" % (html.escape(r["name"]), html.escape(r["note"])))
-    return "\n".join(lines)
+        lines += ["", "Calon long (BELUM masuk, tunggu syarat terpenuhi):", ""]
+        for r in watch[:5]:
+            lines.append(watch_block(r))
+            lines.append("")
+    else:
+        lines.append("Belum ada calon yang layak.")
+    return "\n".join(lines).rstrip()
 
 
 # ---------------- State ----------------
@@ -401,7 +449,9 @@ def scan(dry=False):
                 r["name"], r["label"], r["score"] + (0 if btc["risk_off"] else 10), fmt(r["entry"]),
                 fmt(r["sl"]), fmt(r["tp1"]), fmt(r["tp2"])))
         for r in watch[:10]:
-            print("pantau %-10s %s" % (r["name"], r["note"]))
+            p = r["plan"]
+            print("calon %-10s %s | masuk jika %s | SL %s TP1 %s TP2 %s" % (
+                r["name"], r["note"], r["cond"], fmt(p["sl"]), fmt(p["tp1"]), fmt(p["tp2"])))
         return
 
     state = load_state()
